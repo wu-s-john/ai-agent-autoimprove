@@ -1,0 +1,9 @@
+[project]
+name = "ai-agent-autoimprove"
+version = "0.1.0"
+description = "Feedback loop for improving Claude Code skills by analyzing past conversations"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+harvest = "harvest:main"
