@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Harvest Claude Code conversation logs into SQLite + condensed markdown transcripts.
+Harvest Claude Code conversation logs into a database + condensed markdown transcripts.
 
 Usage:
     uv run harvest.py                              # index everything
     uv run harvest.py --since 2026-03-27           # from date
     uv run harvest.py --since 2026-03-27 --until 2026-03-28
     uv run harvest.py --source ~/conversation-archive/
+    uv run harvest.py --database-url postgresql://...
 """
 
 import argparse
@@ -14,10 +15,11 @@ import json
 import math
 import os
 import re
+import socket
 from datetime import datetime
 from pathlib import Path
 
-from db import DB_PATH, init_db, upsert_conversation
+from db import init_db, upsert_conversation
 
 DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
@@ -559,11 +561,13 @@ def harvest(
     source: Path = DEFAULT_SOURCE,
     since: str | None = None,
     until: str | None = None,
-    db_path: Path = DB_PATH,
+    database_url: str | None = None,
+    source_machine: str | None = None,
 ) -> int:
-    """Harvest conversations from JSONL files into SQLite + transcripts."""
-    conn = init_db(db_path)
+    """Harvest conversations from JSONL files into PostgreSQL + transcripts."""
+    conn = init_db(database_url=database_url)
     transcripts_dir = TRANSCRIPTS_DIR
+    source_machine = source_machine or socket.gethostname()
 
     jsonl_files = list(source.rglob("*.jsonl"))
     print(f"Found {len(jsonl_files)} JSONL files in {source}")
@@ -573,6 +577,7 @@ def harvest(
         data = parse_conversation(fpath)
         if data is None:
             continue
+        data["source_machine"] = source_machine
 
         # Date range filter
         if since and data["ended_at"]:
@@ -600,14 +605,14 @@ def harvest(
 
     conn.commit()
     conn.close()
-    print(f"Harvested {count} conversations → {db_path}")
+    print(f"Harvested {count} conversations into PostgreSQL")
     print(f"Transcripts written to {transcripts_dir}/")
     return count
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Harvest Claude Code conversations into SQLite + transcripts"
+        description="Harvest Claude Code conversations into a database + transcripts"
     )
     parser.add_argument("--since", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--until", help="End date (YYYY-MM-DD)")
@@ -616,14 +621,24 @@ def main():
         default=str(DEFAULT_SOURCE),
         help=f"Source directory of JSONL files (default: {DEFAULT_SOURCE})",
     )
-    parser.add_argument("--db", default=str(DB_PATH), help="Database path")
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help="Explicit PostgreSQL database URL. Defaults to DATABASE_URL if set.",
+    )
+    parser.add_argument(
+        "--source-machine",
+        default=socket.gethostname(),
+        help="Machine label stored with harvested rows (default: local hostname)",
+    )
     args = parser.parse_args()
 
     harvest(
         source=Path(args.source),
         since=args.since,
         until=args.until,
-        db_path=Path(args.db),
+        database_url=args.database_url,
+        source_machine=args.source_machine,
     )
 
 

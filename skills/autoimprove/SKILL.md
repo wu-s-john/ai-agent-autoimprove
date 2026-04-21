@@ -1,6 +1,6 @@
 ---
 name: autoimprove
-description: Analyze past Claude Code conversations to identify difficulties and propose improvements to skills. Reads from a SQLite index of conversation history and condensed transcripts.
+description: Analyze past Claude Code conversations to identify difficulties and propose improvements to skills. Reads from a PostgreSQL index of conversation history and condensed transcripts.
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
@@ -10,7 +10,7 @@ You are analyzing your own past conversations to find patterns of difficulty and
 
 ## Key Paths
 
-- **SQLite database**: `/Users/johnwu/code/ai-agent-autoimprove/conversations.db`
+- **Postgres access**: use `just database-url` or `just psql` from `/Users/johnwu/code/ai-agent-autoimprove`
 - **Condensed transcripts**: `/Users/johnwu/code/ai-agent-autoimprove/transcripts/`
 - **Skills directory**: `/Users/johnwu/code/ai-agent-army/claude/skills/`
 - **Raw JSONL** (for drill-down): path stored in `file_path` column of conversations table
@@ -83,7 +83,7 @@ CREATE TABLE improvements (
 ### Step 1: Check watermark
 
 ```bash
-sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db "SELECT MAX(analyzed_to) FROM analysis_runs"
+psql "$(just --quiet database-url)" -c "SELECT MAX(analyzed_to) FROM analysis_runs;"
 ```
 
 If NULL, this is the first run. If the user specifies a date range, use that instead.
@@ -93,13 +93,13 @@ If NULL, this is the first run. If the user specifies a date range, use that ins
 Query main conversations (not subagents) after the watermark, sorted by friction descending:
 
 ```bash
-sqlite3 -header -column /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
+psql "$(just --quiet database-url)" -c \
   "SELECT session_id, project, duration_minutes, friction_score, efficiency_score, complexity_score, detected_skill, substr(first_user_message, 1, 80) as first_msg
    FROM conversations
    WHERE is_subagent = 0
      AND started_at > 'WATERMARK_DATE'
    ORDER BY friction_score DESC
-   LIMIT 20"
+   LIMIT 20;"
 ```
 
 **Prioritize**: high friction + low complexity = agent struggled on something that should have been easy. These are the highest-value sessions to learn from.
@@ -124,9 +124,15 @@ Each transcript contains: user messages in full, assistant text in full, tool ca
 For each conversation you analyze, write a summary to the database:
 
 ```bash
-sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
-  "INSERT OR REPLACE INTO summaries (session_id, summary, goal, outcome, issues, model_used)
-   VALUES ('SESSION_ID', 'summary text', 'what was the goal', 'what happened', 'what went wrong', 'your-model-id')"
+psql "$(just --quiet database-url)" -c \
+  "INSERT INTO summaries (session_id, summary, goal, outcome, issues, model_used)
+   VALUES ('SESSION_ID', 'summary text', 'what was the goal', 'what happened', 'what went wrong', 'your-model-id')
+   ON CONFLICT (session_id) DO UPDATE SET
+     summary = EXCLUDED.summary,
+     goal = EXCLUDED.goal,
+     outcome = EXCLUDED.outcome,
+     issues = EXCLUDED.issues,
+     model_used = EXCLUDED.model_used;"
 ```
 
 ### Step 5: Analyze patterns
@@ -144,8 +150,8 @@ Look across all analyzed conversations for:
 Before proposing a change, check if it was already made:
 
 ```bash
-sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
-  "SELECT skill_name, description, applied_at FROM improvements WHERE skill_name = 'SKILL_NAME' ORDER BY applied_at DESC"
+psql "$(just --quiet database-url)" -c \
+  "SELECT skill_name, description, applied_at FROM improvements WHERE skill_name = 'SKILL_NAME' ORDER BY applied_at DESC;"
 ```
 
 ### Step 7: Output your findings
@@ -178,9 +184,9 @@ After user approval:
 2. Record the improvement:
 
 ```bash
-sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
+psql "$(just --quiet database-url)" -c \
   "INSERT INTO improvements (improvement_id, run_id, skill_name, description, diff, source_session_ids)
-   VALUES ('imp-TIMESTAMP', 'run-TIMESTAMP', 'skill-name', 'what was changed', 'diff text', '[\"session1\", \"session2\"]')"
+   VALUES ('imp-TIMESTAMP', 'run-TIMESTAMP', 'skill-name', 'what was changed', 'diff text', '[\"session1\", \"session2\"]');"
 ```
 
 ### Step 9: Update watermark
@@ -188,9 +194,9 @@ sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
 After completing the analysis:
 
 ```bash
-sqlite3 /Users/johnwu/code/ai-agent-autoimprove/conversations.db \
+psql "$(just --quiet database-url)" -c \
   "INSERT INTO analysis_runs (run_id, analyzed_from, analyzed_to, conversation_count, findings, skills_affected)
-   VALUES ('run-TIMESTAMP', 'FROM_DATE', 'TO_DATE', COUNT, 'summary of findings', 'skill1, skill2')"
+   VALUES ('run-TIMESTAMP', 'FROM_DATE', 'TO_DATE', COUNT, 'summary of findings', 'skill1, skill2');"
 ```
 
 ## Rules

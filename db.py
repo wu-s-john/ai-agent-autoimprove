@@ -1,23 +1,92 @@
-"""SQLite schema and query helpers for the conversation index."""
+"""Database helpers for the shared PostgreSQL conversation index."""
 
-import sqlite3
-from pathlib import Path
+from __future__ import annotations
 
-DB_PATH = Path(__file__).parent / "conversations.db"
+import os
+from typing import Any
+
+import psycopg
+
+CONVERSATION_COLUMNS = (
+    "session_id",
+    "project",
+    "cwd",
+    "model",
+    "started_at",
+    "ended_at",
+    "duration_minutes",
+    "user_message_count",
+    "assistant_message_count",
+    "tool_call_count",
+    "tool_breakdown",
+    "input_tokens",
+    "output_tokens",
+    "friction_score",
+    "efficiency_score",
+    "complexity_score",
+    "detected_skill",
+    "first_user_message",
+    "file_path",
+    "file_size_bytes",
+    "is_subagent",
+    "parent_session_id",
+    "source_machine",
+)
 
 
-def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+def resolve_database_url(database_url: str | None = None) -> str:
+    url = database_url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "PostgreSQL DATABASE_URL is required. "
+            "Use `just database-url` or set DATABASE_URL explicitly."
+        )
+    if not url.startswith(("postgres://", "postgresql://")):
+        raise ValueError(
+            "Only PostgreSQL is supported. DATABASE_URL must start with "
+            "`postgres://` or `postgresql://`."
+        )
+    return url
 
 
-def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    conn = connect(db_path)
+def connect(
+    database_url: str | None = None,
+) -> Any:
+    return psycopg.connect(resolve_database_url(database_url=database_url))
 
-    conn.execute("""
+
+def _column_exists(conn: Any, table_name: str, column_name: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = %s
+          AND column_name = %s
+        """,
+        (table_name, column_name),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_column(
+    conn: Any,
+    table_name: str,
+    column_name: str,
+    column_type_sql: str,
+) -> None:
+    if _column_exists(conn, table_name, column_name):
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type_sql}")
+
+
+def init_db(
+    database_url: str | None = None,
+) -> Any:
+    conn = connect(database_url=database_url)
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS conversations (
             session_id TEXT PRIMARY KEY,
             project TEXT NOT NULL,
@@ -41,35 +110,42 @@ def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             file_size_bytes INTEGER,
             is_subagent INTEGER DEFAULT 0,
             parent_session_id TEXT,
-            harvested_at TEXT DEFAULT (datetime('now'))
+            source_machine TEXT,
+            harvested_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """
+    )
 
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS summaries (
             session_id TEXT PRIMARY KEY REFERENCES conversations(session_id),
             summary TEXT,
             goal TEXT,
             outcome TEXT,
             issues TEXT,
-            generated_at TEXT DEFAULT (datetime('now')),
+            generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             model_used TEXT
         )
-    """)
+        """
+    )
 
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS analysis_runs (
             run_id TEXT PRIMARY KEY,
-            ran_at TEXT DEFAULT (datetime('now')),
+            ran_at TEXT DEFAULT CURRENT_TIMESTAMP,
             analyzed_from TEXT,
             analyzed_to TEXT,
             conversation_count INTEGER,
             findings TEXT,
             skills_affected TEXT
         )
-    """)
+        """
+    )
 
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS improvements (
             improvement_id TEXT PRIMARY KEY,
             run_id TEXT REFERENCES analysis_runs(run_id),
@@ -77,39 +153,43 @@ def init_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             description TEXT,
             diff TEXT,
             source_session_ids TEXT,
-            applied_at TEXT DEFAULT (datetime('now'))
+            applied_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """
+    )
+
+    _ensure_column(conn, "conversations", "source_machine", "TEXT")
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_project ON conversations(project)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_started ON conversations(started_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_friction ON conversations(friction_score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_parent ON conversations(parent_session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_skill ON conversations(detected_skill)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conv_source_machine ON conversations(source_machine)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_improvements_skill ON improvements(skill_name)")
 
     conn.commit()
     return conn
 
 
-def upsert_conversation(conn: sqlite3.Connection, data: dict) -> None:
+def upsert_conversation(conn: Any, data: dict) -> None:
+    values = [data.get(column) for column in CONVERSATION_COLUMNS]
+    columns_sql = ", ".join(CONVERSATION_COLUMNS)
+
+    placeholders = ", ".join("%s" for _ in CONVERSATION_COLUMNS)
+    updates = ", ".join(
+        f"{column} = EXCLUDED.{column}"
+        for column in CONVERSATION_COLUMNS
+        if column != "session_id"
+    )
     conn.execute(
-        """
-        INSERT OR REPLACE INTO conversations (
-            session_id, project, cwd, model, started_at, ended_at,
-            duration_minutes, user_message_count, assistant_message_count,
-            tool_call_count, tool_breakdown, input_tokens, output_tokens,
-            friction_score, efficiency_score, complexity_score,
-            detected_skill, first_user_message, file_path, file_size_bytes,
-            is_subagent, parent_session_id
-        ) VALUES (
-            :session_id, :project, :cwd, :model, :started_at, :ended_at,
-            :duration_minutes, :user_message_count, :assistant_message_count,
-            :tool_call_count, :tool_breakdown, :input_tokens, :output_tokens,
-            :friction_score, :efficiency_score, :complexity_score,
-            :detected_skill, :first_user_message, :file_path, :file_size_bytes,
-            :is_subagent, :parent_session_id
-        )
+        f"""
+        INSERT INTO conversations ({columns_sql})
+        VALUES ({placeholders})
+        ON CONFLICT (session_id) DO UPDATE SET
+            {updates}
         """,
-        data,
+        values,
     )

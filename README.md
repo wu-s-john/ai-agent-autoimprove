@@ -5,15 +5,21 @@ This repo is a small feedback loop for improving Claude Code skills from past co
 Right now it does two practical things:
 
 1. Harvest Claude Code conversation logs from `~/.claude/projects/`
-2. Turn them into a SQLite index plus condensed Markdown transcripts
+2. Turn them into a database index plus condensed Markdown transcripts
 
 It also includes a draft skill spec at `skills/autoimprove/SKILL.md` that describes how an agent should analyze those indexed conversations and propose skill improvements.
+
+For multi-machine Claude session handoff, see `SYNCTHING.md`.
+For multi-machine Codex session syncing without SQLite state, see `CODEX_SYNCTHING.md`.
+For shared Postgres setup via 1Password + `just`, see `POSTGRES.md`.
 
 ## What Exists Today
 
 - `harvest.py`: parses Claude JSONL conversations and writes structured data
-- `db.py`: creates the SQLite schema and upserts conversation rows
-- `conversations.db`: generated SQLite index
+- `db.py`: creates the database schema and upserts conversation rows
+- `config/op.envmap`: committed 1Password reference map for Postgres credentials
+- `justfile`: operational commands for building URLs, opening `psql`, initializing schema, and harvesting
+- `init_schema.py`: tiny wrapper that runs the idempotent schema bootstrap from `db.py`
 - `transcripts/`: generated condensed Markdown transcripts
 - `skills/autoimprove/SKILL.md`: manual/agent workflow for analyzing the indexed data
 
@@ -23,39 +29,45 @@ The broad `autoimprove` CLI discussed in the earlier Claude session is not fully
 
 - Python 3.12+
 - `uv`
+- `just`
+- `op` if you want to use the Postgres + 1Password flow
+- `psql` if you want interactive Postgres access from the shell
 - local Claude conversation history in `~/.claude/projects`
-- `sqlite3` if you want to inspect the database from the shell
 
 ## Quick Start
 
-From the repo root:
+### Postgres + 1Password
 
 ```bash
 cd /Users/johnwu/code/ai-agent-autoimprove
-uv run harvest.py --since 2026-03-31 --until 2026-03-31
+just schema-init
+just harvest
 ```
 
-Useful flags:
+Useful commands:
 
 ```bash
-uv run harvest.py --help
-uv run harvest.py --since 2026-03-27
-uv run harvest.py --since 2026-03-27 --until 2026-03-28
-uv run harvest.py --source ~/conversation-archive/
-uv run harvest.py --db /tmp/autoimprove.db
+just database-url
+just database-url-admin
+just psql
+just psql-admin
+just schema-init
+just schema-init-admin
+just harvest
 ```
 
-What this command does:
+These commands:
 
-- scans `~/.claude/projects` by default for `*.jsonl`
-- creates or updates `conversations.db`
-- writes condensed Markdown transcripts to `transcripts/`
+- load Postgres credentials from `config/op.envmap` through 1Password
+- initialize the shared schema idempotently
+- connect with `psql`
+- harvest local conversation logs into the shared Postgres database
 
 Expected output looks like:
 
 ```text
 Found 322 JSONL files in /Users/johnwu/.claude/projects
-Harvested 41 conversations → /Users/johnwu/code/ai-agent-autoimprove/conversations.db
+Harvested 41 conversations into PostgreSQL
 Transcripts written to /Users/johnwu/code/ai-agent-autoimprove/transcripts/
 ```
 
@@ -66,7 +78,12 @@ Transcripts written to /Users/johnwu/code/ai-agent-autoimprove/transcripts/
 Example: find high-friction main sessions:
 
 ```bash
-sqlite3 -header -column conversations.db "
+just psql
+```
+
+Then run:
+
+```sql
 SELECT
   session_id,
   project,
@@ -79,8 +96,7 @@ SELECT
 FROM conversations
 WHERE is_subagent = 0
 ORDER BY friction_score DESC
-LIMIT 20
-"
+LIMIT 20;
 ```
 
 ### 2. Read a condensed transcript
@@ -112,8 +128,8 @@ The intended workflow is described in `skills/autoimprove/SKILL.md`.
 
 In practice, the current loop is:
 
-1. Run `uv run harvest.py` to refresh the index.
-2. Use `sqlite3` to find the sessions you care about.
+1. Run `just harvest` or `uv run harvest.py --database-url "$DATABASE_URL"` to refresh the index.
+2. Use `psql` to find the sessions you care about.
 3. Read the matching files in `transcripts/`.
 4. Look for patterns: user corrections, repeated failures, wasted tool calls, missing guidance, and successful patterns worth codifying.
 5. Propose one skill change at a time.
@@ -130,9 +146,13 @@ The skill file includes ready-made SQL examples for:
 ## Important Notes
 
 - `uv run harvest` does not currently work as a packaged console command here. Use `uv run harvest.py`.
+- `db.py` is the source of truth for schema creation. `just schema-init` and `just schema-init-admin` simply invoke that idempotent bootstrap path.
+- SQLite support has been removed from the active workflow. This repo now expects PostgreSQL for schema initialization and harvesting.
 - `main.py` is just a placeholder and is not part of the real workflow.
 - `skills/autoimprove/SKILL.md` currently points at `/Users/johnwu/code/ai-agent-army/claude/skills/` as the target skills directory. If you want to analyze or edit a different skills repo, change that path.
-- `conversations.db` and `transcripts/` are generated artifacts. They will grow as you harvest more sessions.
+- `transcripts/` is a generated artifact and will grow as you harvest more sessions.
+- If you want Claude sessions to move cleanly between machines, use Syncthing for Claude state and keep the database local for now. See `SYNCTHING.md`.
+- If you want multiple machines to write into one shared analysis database, use the Postgres + 1Password + `just` flow in `POSTGRES.md`.
 
 ## Planned But Not Implemented Yet
 
@@ -146,7 +166,7 @@ The earlier Claude session sketched a larger CLI with commands like:
 
 That design is useful as a roadmap, but those commands do not exist in the current codebase yet. For now, usage is:
 
-1. harvest with `harvest.py`
-2. inspect with `sqlite3`
+1. harvest with `just harvest` or `harvest.py`
+2. inspect with `psql`
 3. read transcripts from disk
 4. follow the workflow in `skills/autoimprove/SKILL.md`

@@ -1,6 +1,3 @@
-conversations.db
-conversations.db-wal
-conversations.db-shm
 transcripts/
 __pycache__/
 *.pyc
