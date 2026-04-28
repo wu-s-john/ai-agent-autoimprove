@@ -20,25 +20,28 @@ require-psql:
     }
 
 database-url: require-1password
-    @op run --env-file config/op.envmap -- python3 -c "from os import environ; from urllib.parse import quote; user = quote(environ['PGUSER'], safe=''); password = quote(environ['PGPASSWORD'], safe=''); database = quote(environ['PGDATABASE'], safe=''); url = f\"postgresql://{user}:{password}@{environ['PGHOST']}:{environ['PGPORT']}/{database}\"; sslmode = environ.get('PGSSLMODE', ''); print(url + (f\"?sslmode={quote(sslmode, safe='')}\" if sslmode else ''))"
+    @op run --env-file config/op.envmap -- uv run python -c "from db import resolve_database_url; print(resolve_database_url())"
 
 database-url-admin: require-1password
-    @op run --env-file config/op.envmap -- python3 -c "from os import environ; from urllib.parse import quote; user = quote(environ['POSTGRES_ADMIN_USER'], safe=''); password = quote(environ['POSTGRES_ADMIN_PASSWORD'], safe=''); database = quote(environ['POSTGRES_ADMIN_DATABASE'], safe=''); url = f\"postgresql://{user}:{password}@{environ['POSTGRES_ADMIN_HOST']}:{environ['POSTGRES_ADMIN_PORT']}/{database}\"; sslmode = environ.get('POSTGRES_ADMIN_SSLMODE', ''); print(url + (f\"?sslmode={quote(sslmode, safe='')}\" if sslmode else ''))"
+    @op run --env-file config/op.envmap -- uv run python -c "from db import resolve_database_url; print(resolve_database_url(env_prefix='POSTGRES_ADMIN'))"
 
-psql: require-psql
+psql: require-psql require-1password
     @psql "$$(just --quiet database-url)"
 
-psql-admin: require-psql
+psql-admin: require-psql require-1password
     @psql "$$(just --quiet database-url-admin)"
 
-schema-init:
-    @DATABASE_URL="$$(just --quiet database-url)" \
-      uv run python init_schema.py --database-url "$$DATABASE_URL"
+schema-init *args: require-1password
+    @op run --env-file config/op.envmap -- uv run python init_schema.py {{args}}
 
-schema-init-admin:
-    @DATABASE_URL="$$(just --quiet database-url-admin)" \
-      uv run python init_schema.py --database-url "$$DATABASE_URL"
+reset-db *args: require-1password
+    @op run --env-file config/op.envmap -- uv run python reset_db.py {{args}}
 
-harvest:
-    @DATABASE_URL="$$(just --quiet database-url)" \
-      uv run python harvest.py --database-url "$$DATABASE_URL"
+harvest *args: require-1password
+    @op run --env-file config/op.envmap -- uv run harvest {{args}}
+
+summarize *args: require-1password
+    @op run --env-file config/op.envmap -- uv run summarize {{args}}
+
+refresh *args: require-1password
+    @op run --env-file config/op.envmap -- uv run refresh {{args}}

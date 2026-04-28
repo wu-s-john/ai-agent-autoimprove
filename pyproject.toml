@@ -1,9 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ai-agent-autoimprove"
 version = "0.1.0"
 description = "Feedback loop for improving Claude Code skills by analyzing past conversations"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "openai>=1.107.0,<2",
+    "pydantic>=2.11.0,<3",
+    "psycopg[binary]>=3.2,<4",
+]
 
 [project.scripts]
 harvest = "harvest:main"
+refresh = "refresh:main"
+reset-db = "reset_db:main"
+summarize = "summarize:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+py-modules = [
+    "autoimprove_helpers",
+    "db",
+    "harvest",
+    "init_schema",
+    "logging_utils",
+    "main",
+    "refresh",
+    "reset_db",
+    "session_utils",
+    "setup_syncthing",
+    "summarize",
+]

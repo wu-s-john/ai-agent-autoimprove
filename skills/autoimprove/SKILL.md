@@ -1,209 +1,267 @@
 ---
 name: autoimprove
-description: Analyze past Claude Code conversations to identify difficulties and propose improvements to skills. Reads from a PostgreSQL index of conversation history and condensed transcripts.
+description: Analyze summarized AI coding sessions, classify recurring problems as skill, CLI, or tool gaps, and persist evidence-backed recommendations.
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
 # Autoimprove
 
-You are analyzing your own past conversations to find patterns of difficulty and propose improvements to Claude Code skills.
+Use this skill after `/Users/johnwu/code/ai-agent-autoimprove` has already run `refresh`.
+
+This is the only intended analysis surface in v1. There is no public `analyze` command.
+
+## What This Skill Does
+
+Read summarized AI coding sessions, find recurring patterns, and produce recommendations in three tracks:
+
+- `Skill Improvements`
+- `CLI Opportunities`
+- `External Tool Recommendations`
+
+Use only observable evidence:
+
+- session summaries
+- transcript commentary
+- command and tool usage
+- retries and churn
+- user corrections
+
+Do not infer hidden chain-of-thought.
 
 ## Key Paths
 
-- **Postgres access**: use `just database-url` or `just psql` from `/Users/johnwu/code/ai-agent-autoimprove`
-- **Condensed transcripts**: `/Users/johnwu/code/ai-agent-autoimprove/transcripts/`
-- **Skills directory**: `/Users/johnwu/code/ai-agent-army/claude/skills/`
-- **Raw JSONL** (for drill-down): path stored in `file_path` column of conversations table
+- **Repo root**: `/Users/johnwu/code/ai-agent-autoimprove`
+- **Internal helper module**: `/Users/johnwu/code/ai-agent-autoimprove/autoimprove_helpers.py`
+- **Postgres access**: `just database-url` or `just psql`
+- **Transcripts**: `/Users/johnwu/code/ai-agent-autoimprove/transcripts/`
+- **Shared skills directory**: `/Users/johnwu/code/ai-agent-army/claude/skills/`
+- **Raw JSONL**: `conversations.file_path`
 
-## Database Schema
+## Database Shape
 
-```sql
--- Conversations: metadata + scores for each session
-CREATE TABLE conversations (
-    session_id TEXT PRIMARY KEY,
-    project TEXT,
-    cwd TEXT,
-    model TEXT,
-    started_at TEXT,
-    ended_at TEXT,
-    duration_minutes REAL,
-    user_message_count INTEGER,
-    assistant_message_count INTEGER,
-    tool_call_count INTEGER,
-    tool_breakdown TEXT,       -- JSON: {"Bash": 50, "Edit": 20, ...}
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    friction_score REAL,       -- 1-10, higher = more struggle
-    efficiency_score REAL,     -- 1-10, higher = more efficient
-    complexity_score REAL,     -- 1-10, higher = more complex task
-    detected_skill TEXT,       -- nullable
-    first_user_message TEXT,
-    file_path TEXT,            -- path to raw JSONL
-    file_size_bytes INTEGER,
-    is_subagent INTEGER,       -- 0 or 1
-    parent_session_id TEXT
-);
+### `conversations`
 
--- Summaries: AI-generated per-conversation summaries (you write these)
-CREATE TABLE summaries (
-    session_id TEXT PRIMARY KEY,
-    summary TEXT,
-    goal TEXT,
-    outcome TEXT,
-    issues TEXT,
-    generated_at TEXT,
-    model_used TEXT
-);
+Important fields:
 
--- Analysis runs: watermark tracking (you write these)
-CREATE TABLE analysis_runs (
-    run_id TEXT PRIMARY KEY,
-    ran_at TEXT,
-    analyzed_from TEXT,
-    analyzed_to TEXT,
-    conversation_count INTEGER,
-    findings TEXT,
-    skills_affected TEXT
-);
+- `session_id`
+- `source_app`
+- `native_session_id`
+- `project`
+- `cwd`
+- `model`
+- `started_at`
+- `duration_minutes`
+- `friction_score`
+- `efficiency_score`
+- `complexity_score`
+- `detected_skill`
+- `first_user_message`
+- `file_path`
+- `is_subagent`
+- `parent_session_id`
+- `agent_role`
+- `agent_name`
 
--- Improvements: changelog of skill edits (you write these)
-CREATE TABLE improvements (
-    improvement_id TEXT PRIMARY KEY,
-    run_id TEXT,
-    skill_name TEXT,
-    description TEXT,
-    diff TEXT,
-    source_session_ids TEXT,   -- JSON array of session IDs
-    applied_at TEXT
-);
-```
+### `summaries`
+
+This is the primary filter surface.
+
+- `summary`
+- `goal`
+- `outcome`
+- `issues`
+- `struggles`
+- `user_corrections`
+- `resolution_status`
+- `tags`
+- `model_used`
+
+### `analysis_runs`
+
+One row per completed analysis.
+
+### `improvements`
+
+One row per persisted recommendation.
 
 ## Workflow
 
-### Step 1: Check watermark
+### 1. Start with summaries
+
+Never start by reading every transcript. Select a cohort from `summaries` first.
+
+Use the helper module when possible:
 
 ```bash
-psql "$(just --quiet database-url)" -c "SELECT MAX(analyzed_to) FROM analysis_runs;"
+op run --env-file config/op.envmap -- uv run python - <<'PY'
+from autoimprove_helpers import select_analysis_cohort
+
+rows = select_analysis_cohort(query="postgres", limit=20)
+for row in rows[:5]:
+    print(row["session_id"], row["struggles"], row["tags"])
+PY
 ```
 
-If NULL, this is the first run. If the user specifies a date range, use that instead.
+The query surface includes:
 
-### Step 2: Find conversations to analyze
+- `project`
+- `cwd`
+- `detected_skill`
+- `first_user_message`
+- `summary`
+- `struggles`
+- `user_corrections`
+- `tags`
 
-Query main conversations (not subagents) after the watermark, sorted by friction descending:
+### 2. Prioritize the best evidence sessions
+
+Prefer cohorts that show:
+
+- repeated struggles across multiple sessions
+- high friction with low or medium complexity
+- repeated `user_corrections`
+- unresolved or partially resolved sessions
+- recurring tags, skills, or workflow shapes
+
+Use `group_recurring_patterns()` when you want a quick clustering pass.
+
+### 3. Read transcripts only for evidence
+
+Once the cohort is selected, inspect only the most relevant transcripts.
+
+Use the helper:
 
 ```bash
-psql "$(just --quiet database-url)" -c \
-  "SELECT session_id, project, duration_minutes, friction_score, efficiency_score, complexity_score, detected_skill, substr(first_user_message, 1, 80) as first_msg
-   FROM conversations
-   WHERE is_subagent = 0
-     AND started_at > 'WATERMARK_DATE'
-   ORDER BY friction_score DESC
-   LIMIT 20;"
+op run --env-file config/op.envmap -- uv run python - <<'PY'
+from autoimprove_helpers import load_session_evidence, select_analysis_cohort
+
+row = select_analysis_cohort(query="postgres", limit=1)[0]
+evidence = load_session_evidence(row)
+print(evidence["transcript_path"])
+print(evidence["transcript_text"][:1200])
+PY
 ```
 
-**Prioritize**: high friction + low complexity = agent struggled on something that should have been easy. These are the highest-value sessions to learn from.
+Use raw JSONL only if you need missing tool details.
 
-### Step 3: Read condensed transcripts
+### 4. Classify the recurring issue
 
-Read transcript files for the top conversations:
+For each recurring pattern, classify it as:
 
-```
-/Users/johnwu/code/ai-agent-autoimprove/transcripts/{session_id}.md
-```
+- `skill`
+- `cli`
+- `tool`
+- `mixed`
 
-Subagent transcripts are at:
-```
-/Users/johnwu/code/ai-agent-autoimprove/transcripts/{parent_session_id}/{subagent_id}.md
-```
+Interpretation:
 
-Each transcript contains: user messages in full, assistant text in full, tool calls as one-liners. Tool results are omitted — if you need to see what a specific tool call returned, read the raw JSONL at the path in the `file_path` column.
+- `skill`: the agent needed better instructions, heuristics, or sequencing
+- `cli`: the agent needed a better internal command-line workflow or helper CLI
+- `tool`: the agent needed an external tool or official integration it did not know to use
+- `mixed`: both instruction and tooling gaps are present
 
-### Step 4: Generate summaries
+If a finding is `mixed`, split it into multiple persisted recommendations before storing it. The database stores only `skill`, `cli`, or `tool` rows.
 
-For each conversation you analyze, write a summary to the database:
+### 5. Research external tools only when justified
+
+Do not browse for pure skill gaps.
+
+Browse the web only when:
+
+- a `cli` or `tool` gap repeats across sessions, or
+- one session shows clearly high wasted effort that a tool could remove
+
+When browsing:
+
+- prefer official docs
+- prefer official repos
+- prefer primary project pages over blogs or listicles
+- record the supporting URLs for each external tool recommendation
+
+### 6. Produce exactly four sections
+
+Every completed analysis must return these sections in this order:
+
+- `Observed Patterns`
+- `Skill Improvements`
+- `CLI Opportunities`
+- `External Tool Recommendations`
+
+Recommendations should stay high-level in v1:
+
+- what the missing capability is
+- why it would help
+- evidence sessions
+- why the current skill or tooling is insufficient
+- supporting URLs for external tools
+
+Do not apply changes or edit shared skills until the user explicitly approves them.
+
+### 7. Persist the analysis automatically
+
+Use `persist_analysis_artifacts()` to store:
+
+- one `analysis_runs` row
+- one `improvements` row per recommendation
+
+Example:
 
 ```bash
-psql "$(just --quiet database-url)" -c \
-  "INSERT INTO summaries (session_id, summary, goal, outcome, issues, model_used)
-   VALUES ('SESSION_ID', 'summary text', 'what was the goal', 'what happened', 'what went wrong', 'your-model-id')
-   ON CONFLICT (session_id) DO UPDATE SET
-     summary = EXCLUDED.summary,
-     goal = EXCLUDED.goal,
-     outcome = EXCLUDED.outcome,
-     issues = EXCLUDED.issues,
-     model_used = EXCLUDED.model_used;"
-```
+op run --env-file config/op.envmap -- uv run python - <<'PY'
+from autoimprove_helpers import (
+    ImprovementProposal,
+    persist_analysis_artifacts,
+    render_analysis_report,
+    select_analysis_cohort,
+)
 
-### Step 5: Analyze patterns
+rows = select_analysis_cohort(query="postgres", limit=5)
+report = render_analysis_report({
+    "Observed Patterns": [
+        "Repeated RDS connectivity debugging consumed multiple sessions.",
+    ],
+    "Skill Improvements": [
+        "Add a networking checklist before retrying Postgres connection commands.",
+    ],
+    "CLI Opportunities": [
+        "Provide a small connectivity-check CLI for RDS reachability and auth.",
+    ],
+    "External Tool Recommendations": [
+        "Research official AWS connectivity diagnostics and Postgres client checks.",
+    ],
+})
 
-Look across all analyzed conversations for:
-
-1. **User corrections** — moments where the user had to redirect the agent. What was the agent doing wrong? Could skill instructions have prevented this?
-2. **Repeated errors** — same type of error across multiple sessions (e.g., always failing on a specific build step, repeatedly misunderstanding a codebase pattern)
-3. **Wasted tool calls** — chains of tool calls that didn't contribute to the outcome (exploring wrong directories, reading irrelevant files, retrying the same command)
-4. **Missing guidance** — situations where the agent lacked context it should have had (unfamiliar project conventions, unknown tool configurations, missing workflow knowledge)
-5. **Successful patterns** — approaches that worked well and should be codified
-
-### Step 6: Check for duplicate improvements
-
-Before proposing a change, check if it was already made:
-
-```bash
-psql "$(just --quiet database-url)" -c \
-  "SELECT skill_name, description, applied_at FROM improvements WHERE skill_name = 'SKILL_NAME' ORDER BY applied_at DESC;"
-```
-
-### Step 7: Output your findings
-
-Present your analysis in this format:
-
-#### Difficulties Report
-
-For each significant finding:
-- **What happened**: describe the difficulty pattern
-- **Evidence**: cite specific session IDs and moments from the transcripts
-- **Impact**: how much time/tokens were wasted, how often this occurred
-- **Root cause**: why the agent struggled (missing context, bad instructions, etc.)
-
-#### Proposed Improvements
-
-For each proposed skill change:
-- **Skill**: which SKILL.md to modify
-- **Change**: what to add, remove, or modify
-- **Rationale**: which difficulties this addresses, with evidence
-- **Diff preview**: show the proposed edit
-
-Wait for the user to approve each proposed change before applying it.
-
-### Step 8: Apply approved changes
-
-After user approval:
-
-1. Edit the SKILL.md file
-2. Record the improvement:
-
-```bash
-psql "$(just --quiet database-url)" -c \
-  "INSERT INTO improvements (improvement_id, run_id, skill_name, description, diff, source_session_ids)
-   VALUES ('imp-TIMESTAMP', 'run-TIMESTAMP', 'skill-name', 'what was changed', 'diff text', '[\"session1\", \"session2\"]');"
-```
-
-### Step 9: Update watermark
-
-After completing the analysis:
-
-```bash
-psql "$(just --quiet database-url)" -c \
-  "INSERT INTO analysis_runs (run_id, analyzed_from, analyzed_to, conversation_count, findings, skills_affected)
-   VALUES ('run-TIMESTAMP', 'FROM_DATE', 'TO_DATE', COUNT, 'summary of findings', 'skill1, skill2');"
+run_id = persist_analysis_artifacts(
+    report_markdown=report,
+    cohort_rows=rows,
+    query_text="postgres",
+    filters={"query": "postgres", "limit": 5},
+    research_performed=True,
+    recommendations=[
+        ImprovementProposal(
+            improvement_type="skill",
+            target_name="postgres-debugging",
+            description="Add an RDS networking triage checklist.",
+            rationale="Multiple sessions wasted turns on connectivity assumptions before checking SG and reachability.",
+            evidence_session_ids=[row["session_id"] for row in rows[:2]],
+        ),
+        ImprovementProposal(
+            improvement_type="cli",
+            target_name="rds-connectivity-check",
+            description="Create a CLI helper that tests DNS, TCP reachability, and psql auth preconditions.",
+            rationale="The same manual checks were repeated across sessions.",
+            evidence_session_ids=[row["session_id"] for row in rows[:2]],
+        ),
+    ],
+)
+print(run_id)
+PY
 ```
 
 ## Rules
 
-- **Always cite evidence**: never propose a change without pointing to specific sessions and transcript excerpts
-- **Get approval**: always show the proposed diff and wait for user confirmation before editing any skill file
-- **One change at a time**: propose and apply improvements individually, not as a batch
-- **Be conservative**: only propose changes when there's clear evidence from multiple sessions or a significant single incident
-- **Skills only**: only modify files in the skills directory, not CLAUDE.md or other config
-- **Record everything**: every analysis run and every improvement gets recorded in the database
+- Use summaries as the search surface and transcripts as evidence.
+- Prefer recurring patterns over one-off noise.
+- Always cite concrete sessions.
+- Keep recommendations high-level unless the user asks for detailed implementation.
+- Persist proposals automatically, but do not edit shared skills or implement tooling changes without approval.

@@ -1,5 +1,8 @@
 # Safe to commit: these are 1Password references, not live secrets.
 
+# OpenAI credentials
+OPENAI_API_KEY=op://Personal/OpenAI/API_KEY
+
 # App database credentials
 PGHOST=op://ai-agent-army/autoimprove-postgres-app/host
 PGPORT=op://ai-agent-army/autoimprove-postgres-app/port
