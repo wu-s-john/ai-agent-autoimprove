@@ -1,0 +1,10 @@
+# Safe to commit: these are 1Password references, not live secrets.
+
+# Admin database credentials.
+# These refs require access to the ai-agent-army vault.
+POSTGRES_ADMIN_HOST=op://ai-agent-army/autoimprove-postgres-admin/host
+POSTGRES_ADMIN_PORT=op://ai-agent-army/autoimprove-postgres-admin/port
+POSTGRES_ADMIN_DATABASE=op://ai-agent-army/autoimprove-postgres-admin/database
+POSTGRES_ADMIN_USER=op://ai-agent-army/autoimprove-postgres-admin/username
+POSTGRES_ADMIN_PASSWORD=op://ai-agent-army/autoimprove-postgres-admin/password
+POSTGRES_ADMIN_SSLMODE=op://ai-agent-army/autoimprove-postgres-admin/sslmode

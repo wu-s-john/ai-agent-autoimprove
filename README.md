@@ -55,6 +55,8 @@ just refresh --model gpt-5.4-mini
 Useful commands:
 
 ```bash
+just load-dev-token
+just setup-env
 just database-url
 just database-url-admin
 just psql
@@ -65,6 +67,20 @@ just harvest
 just summarize --model gpt-5.4-mini
 just refresh --model gpt-5.4-mini
 ```
+
+## 1Password Runtime Auth
+
+Normal runtime commands (`harvest`, `summarize`, `refresh`, `schema-init`, `database-url`, `psql`) read from `config/op.envmap`, which is scoped to the `ai-agent-army-dev` vault (`ihqmf2zd73upmihfnh4o4t2tam`).
+
+For non-interactive use, seed the dev service-account token once:
+
+```bash
+just load-dev-token
+```
+
+That writes `AI_AGENT_ARMY_DEV_SERVICE_ACCOUNT_TOKEN` to local `.env` (`.gitignore`d). After that, `just harvest` and the other runtime commands can resolve 1Password refs through the service account. `just setup-env` is optional; it materializes runtime secrets into `.env` for tools that do not call `op run` themselves.
+
+Admin-only commands (`database-url-admin`, `psql-admin`, `reset-db`) still require interactive access to the `ai-agent-army` vault because they use `config/op-admin.envmap`.
 
 ## Command UX
 

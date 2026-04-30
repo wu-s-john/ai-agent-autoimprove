@@ -1,20 +1,14 @@
 # Safe to commit: these are 1Password references, not live secrets.
 
-# OpenAI credentials
-OPENAI_API_KEY=op://Personal/OpenAI/API_KEY
+# Runtime credentials.
+# These refs are readable by the ai-agent-army-dev service account.
+# Vault: ai-agent-army-dev (ihqmf2zd73upmihfnh4o4t2tam)
+OPENAI_API_KEY=op://ai-agent-army-dev/OpenAI/API_KEY
 
 # App database credentials
-PGHOST=op://ai-agent-army/autoimprove-postgres-app/host
-PGPORT=op://ai-agent-army/autoimprove-postgres-app/port
-PGDATABASE=op://ai-agent-army/autoimprove-postgres-app/database
-PGUSER=op://ai-agent-army/autoimprove-postgres-app/username
-PGPASSWORD=op://ai-agent-army/autoimprove-postgres-app/password
-PGSSLMODE=op://ai-agent-army/autoimprove-postgres-app/sslmode
-
-# Admin database credentials
-POSTGRES_ADMIN_HOST=op://ai-agent-army/autoimprove-postgres-admin/host
-POSTGRES_ADMIN_PORT=op://ai-agent-army/autoimprove-postgres-admin/port
-POSTGRES_ADMIN_DATABASE=op://ai-agent-army/autoimprove-postgres-admin/database
-POSTGRES_ADMIN_USER=op://ai-agent-army/autoimprove-postgres-admin/username
-POSTGRES_ADMIN_PASSWORD=op://ai-agent-army/autoimprove-postgres-admin/password
-POSTGRES_ADMIN_SSLMODE=op://ai-agent-army/autoimprove-postgres-admin/sslmode
+PGHOST=op://ai-agent-army-dev/autoimprove-postgres-app/host
+PGPORT=op://ai-agent-army-dev/autoimprove-postgres-app/port
+PGDATABASE=op://ai-agent-army-dev/autoimprove-postgres-app/database
+PGUSER=op://ai-agent-army-dev/autoimprove-postgres-app/username
+PGPASSWORD=op://ai-agent-army-dev/autoimprove-postgres-app/password
+PGSSLMODE=op://ai-agent-army-dev/autoimprove-postgres-app/sslmode
